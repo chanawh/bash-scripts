@@ -1,144 +1,145 @@
+[root@localhost bash-scripts]# cat system-monitor.sh
 #!/bin/bash
 
-# Colors using tput for portability
-RED=$(tput setaf 1)
-GREEN=$(tput setaf 2)
-YELLOW=$(tput setaf 3)
-CYAN=$(tput setaf 6)
-NC=$(tput sgr0)
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
 
-# Options
+# Default refresh interval (seconds)
 INTERVAL=2
-CLEAR_SCREEN=true
-LOG_FILE=""
-RUN_ONCE=false
-DEBUG=false
+
+# Thresholds for alerts
+CPU_THRESHOLD=90
+MEM_THRESHOLD=90
+DISK_THRESHOLD=90
+
+# Print usage/help
+usage() {
+    echo "Usage: $0 [-i interval]"
+    echo "  -i interval    Refresh interval in seconds (default: 2)"
+    exit 1
+}
 
 # Parse arguments
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --once) RUN_ONCE=true ;;
-        --interval) INTERVAL="$2"; shift ;;
-        --no-clear) CLEAR_SCREEN=false ;;
-        --log) LOG_FILE="$2"; shift ;;
-        --debug) DEBUG=true ;;
-    esac
-    shift
+while getopts ":i:h" opt; do
+  case $opt in
+    i) INTERVAL=$OPTARG ;;
+    h) usage ;;
+    *) usage ;;
+  esac
 done
 
-log_debug() {
-    [[ "$DEBUG" == true ]] && echo -e "${YELLOW}[DEBUG] $1${NC}"
-}
-
-# Function to get CPU usage
+# Function to get CPU usage %
 get_cpu_usage() {
-    log_debug "Getting CPU usage..."
-    CPU=$(top -bn1 | grep "Cpu(s)" | awk '{for (i=1;i<=NF;i++) if ($i ~ /id,?/) print 100 - $(i-1)}')
-    echo -e "${CYAN}CPU Usage:${NC} ${CPU}%"
+    local cpu
+    cpu=$(top -bn1 | grep "Cpu(s)" | awk -F'id,' '{ split($1, vs, ","); v=vs[length(vs)]; sub("%", "", v); printf "%.1f", 100 - v }' 2>/dev/null)
+    if [[ -z "$cpu" ]]; then
+      echo -e "${CYAN}CPU Usage:${NC} N/A"
+      return
+    fi
+    echo -e "${CYAN}CPU Usage:${NC} ${cpu}%"
+    if (( $(echo "$cpu > $CPU_THRESHOLD" | bc -l) )); then
+      echo -e "${RED}⚠️  WARNING: High CPU usage!${NC}"
+    fi
 }
 
-# Function to get memory usage
+# Function to get Memory usage %
 get_memory_usage() {
-    log_debug "Getting memory usage..."
-    RAW=$(free -m)
-    log_debug "Raw output of free -m:\n$RAW"
-    MEM=$(echo "$RAW" | awk '/Mem:/ {printf "%.2f", $3*100/$2 }')
-    log_debug "Calculated memory usage: ${MEM}%"
-    echo -e "${CYAN}Memory Usage:${NC} ${MEM}%"
+    local mem
+    mem=$(free -m 2>/dev/null | awk 'NR==2{printf "%.2f", $3*100/$2 }')
+    if [[ -z "$mem" ]]; then
+      echo -e "${CYAN}Memory Usage:${NC} N/A"
+      return
+    fi
+    echo -e "${CYAN}Memory Usage:${NC} ${mem}%"
+    if (( $(echo "$mem > $MEM_THRESHOLD" | bc -l) )); then
+      echo -e "${RED}⚠️  WARNING: High Memory usage!${NC}"
+    fi
 }
 
-# Function to get disk usage
+# Function to get Disk usage %
 get_disk_usage() {
-    log_debug "Getting disk usage..."
-    DISK=$(df -h / | awk 'NR==2 {print $5}')
-    echo -e "${CYAN}Disk Usage (root):${NC} ${DISK}"
+    local disk
+    disk=$(df -h / 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+    if [[ -z "$disk" ]]; then
+      echo -e "${CYAN}Disk Usage (root):${NC} N/A"
+      return
+    fi
+    echo -e "${CYAN}Disk Usage (root):${NC} ${disk}%"
+    if (( disk > DISK_THRESHOLD )); then
+      echo -e "${RED}⚠️  WARNING: High Disk usage!${NC}"
+    fi
 }
 
-# Function to get network stats
+# Function to get Network stats (RX, TX in MB) and IP address
 get_network_stats() {
-    log_debug "Getting network stats..."
-    IFACE=$(ip route | awk '/default/ {print $5}' | head -n1)
-    if [[ -z "$IFACE" || ! -d "/sys/class/net/$IFACE" ]]; then
-        echo -e "${CYAN}Network:${NC} Interface not found"
-        return
+    local iface rx tx ip
+    iface=$(ip route 2>/dev/null | grep default | awk '{print $5}' | head -n1)
+    if [[ -z "$iface" ]]; then
+      echo -e "${CYAN}Network:${NC} Interface N/A"
+      return
     fi
 
-    RX1=$(cat /sys/class/net/$IFACE/statistics/rx_bytes 2>/dev/null)
-    TX1=$(cat /sys/class/net/$IFACE/statistics/tx_bytes 2>/dev/null)
-    sleep 0.5
-    RX2=$(cat /sys/class/net/$IFACE/statistics/rx_bytes 2>/dev/null)
-    TX2=$(cat /sys/class/net/$IFACE/statistics/tx_bytes 2>/dev/null)
-
-    if [[ -z "$RX1" || -z "$RX2" ]]; then
-        echo -e "${CYAN}Network:${NC} Data unavailable"
-        return
+    if [[ ! -d /sys/class/net/$iface/statistics ]]; then
+      echo -e "${CYAN}Network:${NC} Interface $iface stats unavailable"
+      return
     fi
 
-    RX_RATE=$(( (RX2 - RX1) / 512 )) # ~KB/s
-    TX_RATE=$(( (TX2 - TX1) / 512 ))
+    rx=$(cat /sys/class/net/$iface/statistics/rx_bytes 2>/dev/null)
+    tx=$(cat /sys/class/net/$iface/statistics/tx_bytes 2>/dev/null)
 
-    echo -e "${CYAN}Network RX:${NC} ${RX_RATE} KB/s | ${CYAN}TX:${NC} ${TX_RATE} KB/s"
+    # Convert bytes to MB
+    rx_mb=$((rx / 1024 / 1024))
+    tx_mb=$((tx / 1024 / 1024))
+
+    # Get IP address(es)
+    ip=$(ip addr show "$iface" 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
+
+    echo -e "${CYAN}Network ($iface):${NC} RX: ${rx_mb} MB | TX: ${tx_mb} MB | IP: ${ip:-N/A}"
 }
 
 # Function to get system uptime
 get_uptime() {
-    log_debug "Getting uptime..."
-    UPTIME=$(uptime -p)
-    echo -e "${CYAN}Uptime:${NC} ${UPTIME}"
+    local uptime
+    uptime=$(uptime -p 2>/dev/null)
+    echo -e "${CYAN}Uptime:${NC} ${uptime:-N/A}"
 }
 
-# Function to get temperature
-get_temperature() {
-    log_debug "Getting CPU temperature..."
-    if command -v sensors &> /dev/null; then
-        TEMP=$(sensors | grep -m 1 'Package id 0:' | awk '{print $4}')
-        echo -e "${CYAN}CPU Temp:${NC} ${TEMP:-N/A}"
-    else
-        echo -e "${CYAN}CPU Temp:${NC} sensors not installed"
-    fi
+# Function to get load averages
+get_load_average() {
+    local load
+    load=$(uptime 2>/dev/null | awk -F'load average:' '{ print $2 }' | xargs)
+    echo -e "${CYAN}Load Average:${NC} ${load:-N/A}"
 }
 
-# Function to list top running processes
-list_all_processes() {
-    log_debug "Listing top processes..."
-    echo -e "${CYAN}Top Running Processes:${NC}"
-    echo -e "${YELLOW}PID      COMMAND             %CPU       %MEM${NC}"
-    ps -eo pid,comm,%cpu,%mem --sort=-%cpu | head -n 10 | awk '{printf "%-8s %-20s %-10s %-10s\n", $1, $2, $3, $4}'
+# Function to get top 3 CPU and Memory consuming processes
+get_top_processes() {
+    echo -e "${CYAN}Top Processes (CPU% | MEM% | COMMAND):${NC}"
+    ps -eo pcpu,pmem,comm --sort=-pcpu | head -n 4 | tail -n 3 | \
+      awk '{printf "  %5s%%  | %5s%% | %s\n", $1, $2, $3}'
 }
 
-# Function to highlight heavy resource usage
-highlight_heavy_processes() {
-    log_debug "Highlighting heavy processes..."
-    echo -e "${CYAN}Processes Using >50% CPU or >30% MEM:${NC}"
-    echo -e "${YELLOW}PID      COMMAND             %CPU       %MEM${NC}"
-    ps -eo pid,comm,%cpu,%mem --sort=-%cpu | awk '$3 > 50 || $4 > 30 {printf "%-8s %-20s %-10s %-10s\n", $1, $2, $3, $4}'
-}
-
-# Function to draw a header
+# Function to draw the header
 draw_header() {
-    log_debug "Drawing header..."
-    if [[ "$CLEAR_SCREEN" == true ]]; then clear; fi
+    clear
     echo -e "${YELLOW}=============================="
-    echo -e "   🖥️  Red Hat System Monitor"
+    echo -e "   🖥️  Enhanced System Monitor"
     echo -e "==============================${NC}"
 }
 
 # Main loop
 while true; do
-    {
-        draw_header
-        get_cpu_usage
-        get_memory_usage
-        get_disk_usage
-        get_network_stats
-        get_temperature
-        get_uptime
-        echo -e "${YELLOW}----------------------------------------${NC}"
-        list_all_processes
-        highlight_heavy_processes
-        echo -e "${YELLOW}Updated: $(date)${NC}"
-    } | tee -a "$LOG_FILE"
-
-    [[ "$RUN_ONCE" == true ]] && break
+    draw_header
+    get_cpu_usage
+    get_memory_usage
+    get_disk_usage
+    get_network_stats
+    get_uptime
+    get_load_average
+    get_top_processes
+    echo -e "${YELLOW}Updated: $(date) | Refresh interval: ${INTERVAL}s${NC}"
     sleep "$INTERVAL"
 done
