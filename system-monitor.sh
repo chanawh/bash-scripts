@@ -33,12 +33,11 @@ log_debug() {
 # Function to get CPU usage
 get_cpu_usage() {
     log_debug "Getting CPU usage..."
-    CPU=$(top -bn1 | grep "Cpu(s)" | awk -F'id,' '{ split($1, vs, ","); v=vs[length(vs)]; sub("%", "", v); printf "%.1f", 100 - v }')
+    CPU=$(top -bn1 | grep "Cpu(s)" | awk '{for (i=1;i<=NF;i++) if ($i ~ /id,?/) print 100 - $(i-1)}')
     echo -e "${CYAN}CPU Usage:${NC} ${CPU}%"
 }
 
 # Function to get memory usage
-
 get_memory_usage() {
     log_debug "Getting memory usage..."
     RAW=$(free -m)
@@ -47,7 +46,6 @@ get_memory_usage() {
     log_debug "Calculated memory usage: ${MEM}%"
     echo -e "${CYAN}Memory Usage:${NC} ${MEM}%"
 }
-
 
 # Function to get disk usage
 get_disk_usage() {
@@ -59,18 +57,26 @@ get_disk_usage() {
 # Function to get network stats
 get_network_stats() {
     log_debug "Getting network stats..."
-    IFACE=$(ip route | grep default | awk '{print $5}')
-    if [[ -z "$IFACE" ]]; then
+    IFACE=$(ip route | awk '/default/ {print $5}' | head -n1)
+    if [[ -z "$IFACE" || ! -d "/sys/class/net/$IFACE" ]]; then
         echo -e "${CYAN}Network:${NC} Interface not found"
         return
     fi
-    RX1=$(cat /sys/class/net/$IFACE/statistics/rx_bytes)
-    TX1=$(cat /sys/class/net/$IFACE/statistics/tx_bytes)
-    sleep 1
-    RX2=$(cat /sys/class/net/$IFACE/statistics/rx_bytes)
-    TX2=$(cat /sys/class/net/$IFACE/statistics/tx_bytes)
-    RX_RATE=$(( (RX2 - RX1) / 1024 ))
-    TX_RATE=$(( (TX2 - TX1) / 1024 ))
+
+    RX1=$(cat /sys/class/net/$IFACE/statistics/rx_bytes 2>/dev/null)
+    TX1=$(cat /sys/class/net/$IFACE/statistics/tx_bytes 2>/dev/null)
+    sleep 0.5
+    RX2=$(cat /sys/class/net/$IFACE/statistics/rx_bytes 2>/dev/null)
+    TX2=$(cat /sys/class/net/$IFACE/statistics/tx_bytes 2>/dev/null)
+
+    if [[ -z "$RX1" || -z "$RX2" ]]; then
+        echo -e "${CYAN}Network:${NC} Data unavailable"
+        return
+    fi
+
+    RX_RATE=$(( (RX2 - RX1) / 512 )) # ~KB/s
+    TX_RATE=$(( (TX2 - TX1) / 512 ))
+
     echo -e "${CYAN}Network RX:${NC} ${RX_RATE} KB/s | ${CYAN}TX:${NC} ${TX_RATE} KB/s"
 }
 
@@ -86,7 +92,7 @@ get_temperature() {
     log_debug "Getting CPU temperature..."
     if command -v sensors &> /dev/null; then
         TEMP=$(sensors | grep -m 1 'Package id 0:' | awk '{print $4}')
-        echo -e "${CYAN}CPU Temp:${NC} ${TEMP}"
+        echo -e "${CYAN}CPU Temp:${NC} ${TEMP:-N/A}"
     else
         echo -e "${CYAN}CPU Temp:${NC} sensors not installed"
     fi
@@ -131,7 +137,7 @@ while true; do
         list_all_processes
         highlight_heavy_processes
         echo -e "${YELLOW}Updated: $(date)${NC}"
-    } | tee >(if [[ -n "$LOG_FILE" ]]; then cat >> "$LOG_FILE"; fi)
+    } | tee -a "$LOG_FILE"
 
     [[ "$RUN_ONCE" == true ]] && break
     sleep "$INTERVAL"
