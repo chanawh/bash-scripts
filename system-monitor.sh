@@ -1,3 +1,4 @@
+
 #!/bin/bash
 
 # Colors
@@ -40,6 +41,20 @@ get_uptime() {
     echo -e "${CYAN}Uptime:${NC} ${UPTIME}"
 }
 
+# Function to list top running processes
+list_all_processes() {
+    echo -e "${CYAN}Top Running Processes:${NC}"
+    echo -e "${YELLOW}PID      COMMAND             %CPU       %MEM${NC}"
+    ps -eo pid,comm,%cpu,%mem --sort=-%cpu | head -n 10 | awk '{printf "%-8s %-20s %-10s %-10s\n", $1, $2, $3, $4}'
+}
+
+# Function to highlight heavy resource usage
+highlight_heavy_processes() {
+    echo -e "${CYAN}Processes Using >50% CPU or >30% MEM:${NC}"
+    echo -e "${YELLOW}PID      COMMAND             %CPU       %MEM${NC}"
+    ps -eo pid,comm,%cpu,%mem --sort=-%cpu | awk '$3 > 50 || $4 > 30 {printf "%-8s %-20s %-10s %-10s\n", $1, $2, $3, $4}'
+}
+
 # Function to draw a header
 draw_header() {
     clear
@@ -56,6 +71,9 @@ while true; do
     get_disk_usage
     get_network_stats
     get_uptime
+    echo -e "${YELLOW}----------------------------------------${NC}"
+    list_all_processes
+    highlight_heavy_processes
     echo -e "${YELLOW}Updated: $(date)${NC}"
     sleep 2
 done
