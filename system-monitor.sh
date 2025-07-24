@@ -38,11 +38,16 @@ get_cpu_usage() {
 }
 
 # Function to get memory usage
+
 get_memory_usage() {
     log_debug "Getting memory usage..."
-    MEM=$(free -m | awk 'NR==2{printf "%.2f", $3*100/$2 }')
+    RAW=$(free -m)
+    log_debug "Raw output of free -m:\n$RAW"
+    MEM=$(echo "$RAW" | awk '/Mem:/ {printf "%.2f", $3*100/$2 }')
+    log_debug "Calculated memory usage: ${MEM}%"
     echo -e "${CYAN}Memory Usage:${NC} ${MEM}%"
 }
+
 
 # Function to get disk usage
 get_disk_usage() {
