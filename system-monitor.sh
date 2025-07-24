@@ -1,17 +1,31 @@
-
 #!/bin/bash
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+# Colors using tput for portability
+RED=$(tput setaf 1)
+GREEN=$(tput setaf 2)
+YELLOW=$(tput setaf 3)
+CYAN=$(tput setaf 6)
+NC=$(tput sgr0)
+
+# Options
+INTERVAL=2
+CLEAR_SCREEN=true
+LOG_FILE=""
+
+# Parse arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --once) RUN_ONCE=true ;;
+        --interval) INTERVAL="$2"; shift ;;
+        --no-clear) CLEAR_SCREEN=false ;;
+        --log) LOG_FILE="$2"; shift ;;
+    esac
+    shift
+done
 
 # Function to get CPU usage
 get_cpu_usage() {
-    CPU=$(top -bn1 | grep "Cpu(s)" | awk -F'id,' -v prefix="$prefix" \
-        '{ split($1, vs, ","); v=vs[length(vs)]; sub("%", "", v); printf "%.1f", 100 - v }')
+    CPU=$(top -bn1 | grep "Cpu(s)" | awk -F'id,' '{ split($1, vs, ","); v=vs[length(vs)]; sub("%", "", v); printf "%.1f", 100 - v }')
     echo -e "${CYAN}CPU Usage:${NC} ${CPU}%"
 }
 
@@ -27,18 +41,31 @@ get_disk_usage() {
     echo -e "${CYAN}Disk Usage (root):${NC} ${DISK}"
 }
 
-# Function to get network stats
+# Function to get network stats (delta-based)
 get_network_stats() {
     IFACE=$(ip route | grep default | awk '{print $5}')
-    RX=$(cat /sys/class/net/$IFACE/statistics/rx_bytes)
-    TX=$(cat /sys/class/net/$IFACE/statistics/tx_bytes)
-    echo -e "${CYAN}Network RX:${NC} $((RX / 1024 / 1024)) MB | ${CYAN}TX:${NC} $((TX / 1024 / 1024)) MB"
+    RX1=$(cat /sys/class/net/$IFACE/statistics/rx_bytes)
+    TX1=$(cat /sys/class/net/$IFACE/statistics/tx_bytes)
+    sleep 1
+    RX2=$(cat /sys/class/net/$IFACE/statistics/rx_bytes)
+    TX2=$(cat /sys/class/net/$IFACE/statistics/tx_bytes)
+    RX_RATE=$(( (RX2 - RX1) / 1024 ))
+    TX_RATE=$(( (TX2 - TX1) / 1024 ))
+    echo -e "${CYAN}Network RX:${NC} ${RX_RATE} KB/s | ${CYAN}TX:${NC} ${TX_RATE} KB/s"
 }
 
 # Function to get system uptime
 get_uptime() {
     UPTIME=$(uptime -p)
     echo -e "${CYAN}Uptime:${NC} ${UPTIME}"
+}
+
+# Function to get temperature (if available)
+get_temperature() {
+    if command -v sensors &> /dev/null; then
+        TEMP=$(sensors | grep -m 1 'Package id 0:' | awk '{print $4}')
+        echo -e "${CYAN}CPU Temp:${NC} ${TEMP}"
+    fi
 }
 
 # Function to list top running processes
@@ -57,7 +84,7 @@ highlight_heavy_processes() {
 
 # Function to draw a header
 draw_header() {
-    clear
+    $CLEAR_SCREEN && clear
     echo -e "${YELLOW}=============================="
     echo -e "   🖥️  Red Hat System Monitor"
     echo -e "==============================${NC}"
@@ -65,15 +92,20 @@ draw_header() {
 
 # Main loop
 while true; do
-    draw_header
-    get_cpu_usage
-    get_memory_usage
-    get_disk_usage
-    get_network_stats
-    get_uptime
-    echo -e "${YELLOW}----------------------------------------${NC}"
-    list_all_processes
-    highlight_heavy_processes
-    echo -e "${YELLOW}Updated: $(date)${NC}"
-    sleep 2
+    {
+        draw_header
+        get_cpu_usage
+        get_memory_usage
+        get_disk_usage
+        get_network_stats
+        get_temperature
+        get_uptime
+        echo -e "${YELLOW}----------------------------------------${NC}"
+        list_all_processes
+        highlight_heavy_processes
+        echo -e "${YELLOW}Updated: $(date)${NC}"
+    } | tee >(if [[ -n "$LOG_FILE" ]]; then cat >> "$LOG_FILE"; fi)
+
+    [[ "$RUN_ONCE" == true ]] && break
+    sleep "$INTERVAL"
 done
