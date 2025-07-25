@@ -1,5 +1,6 @@
-[root@localhost bash-scripts]# cat system-monitor.sh
 #!/bin/bash
+
+# sysmon - Advanced Bash System Monitor CLI Tool
 
 # Colors
 RED='\033[0;31m'
@@ -8,138 +9,122 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Default refresh interval (seconds)
+# Default values
 INTERVAL=2
+OUTPUT_MODE="human"  # human, json, csv
+LOG_FILE=""
 
-# Thresholds for alerts
+# Thresholds
 CPU_THRESHOLD=90
 MEM_THRESHOLD=90
 DISK_THRESHOLD=90
 
-# Print usage/help
+# Usage info
 usage() {
-    echo "Usage: $0 [-i interval]"
-    echo "  -i interval    Refresh interval in seconds (default: 2)"
+    echo "Usage: $0 [-i interval] [-o output_mode] [-l log_file] [-h]"
+    echo "  -i interval       Refresh interval in seconds (default: 2)"
+    echo "  -o output_mode    Output format: human | json | csv (default: human)"
+    echo "  -l log_file       Path to log file (optional)"
+    echo "  -h                Show this help message"
     exit 1
 }
 
-# Parse arguments
-while getopts ":i:h" opt; do
+# Parse CLI args
+while getopts ":i:o:l:h" opt; do
   case $opt in
     i) INTERVAL=$OPTARG ;;
+    o) OUTPUT_MODE=$OPTARG ;;
+    l) LOG_FILE=$OPTARG ;;
     h) usage ;;
     *) usage ;;
   esac
 done
 
-# Function to get CPU usage %
+# Trap Ctrl+C and exit gracefully
+trap "echo -e '\n${YELLOW}Exiting sysmon...${NC}'; exit 0" SIGINT
+
+# System data collectors
 get_cpu_usage() {
-    local cpu
-    cpu=$(top -bn1 | grep "Cpu(s)" | awk -F'id,' '{ split($1, vs, ","); v=vs[length(vs)]; sub("%", "", v); printf "%.1f", 100 - v }' 2>/dev/null)
-    if [[ -z "$cpu" ]]; then
-      echo -e "${CYAN}CPU Usage:${NC} N/A"
-      return
-    fi
-    echo -e "${CYAN}CPU Usage:${NC} ${cpu}%"
-    if (( $(echo "$cpu > $CPU_THRESHOLD" | bc -l) )); then
-      echo -e "${RED}⚠️  WARNING: High CPU usage!${NC}"
-    fi
+    top -bn1 | grep "Cpu(s)" | awk '{usage=100 - $8; printf "%.1f", usage}'
 }
 
-# Function to get Memory usage %
-get_memory_usage() {
-    local mem
-    mem=$(free -m 2>/dev/null | awk 'NR==2{printf "%.2f", $3*100/$2 }')
-    if [[ -z "$mem" ]]; then
-      echo -e "${CYAN}Memory Usage:${NC} N/A"
-      return
-    fi
-    echo -e "${CYAN}Memory Usage:${NC} ${mem}%"
-    if (( $(echo "$mem > $MEM_THRESHOLD" | bc -l) )); then
-      echo -e "${RED}⚠️  WARNING: High Memory usage!${NC}"
-    fi
+get_mem_usage() {
+    free | awk '/Mem:/ { printf "%.1f", $3*100/$2 }'
 }
 
-# Function to get Disk usage %
 get_disk_usage() {
-    local disk
-    disk=$(df -h / 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
-    if [[ -z "$disk" ]]; then
-      echo -e "${CYAN}Disk Usage (root):${NC} N/A"
-      return
-    fi
-    echo -e "${CYAN}Disk Usage (root):${NC} ${disk}%"
-    if (( disk > DISK_THRESHOLD )); then
-      echo -e "${RED}⚠️  WARNING: High Disk usage!${NC}"
-    fi
+    df / | awk 'NR==2 { gsub("%", "", $5); print $5 }'
 }
 
-# Function to get Network stats (RX, TX in MB) and IP address
-get_network_stats() {
-    local iface rx tx ip
-    iface=$(ip route 2>/dev/null | grep default | awk '{print $5}' | head -n1)
-    if [[ -z "$iface" ]]; then
-      echo -e "${CYAN}Network:${NC} Interface N/A"
-      return
-    fi
-
-    if [[ ! -d /sys/class/net/$iface/statistics ]]; then
-      echo -e "${CYAN}Network:${NC} Interface $iface stats unavailable"
-      return
-    fi
-
-    rx=$(cat /sys/class/net/$iface/statistics/rx_bytes 2>/dev/null)
-    tx=$(cat /sys/class/net/$iface/statistics/tx_bytes 2>/dev/null)
-
-    # Convert bytes to MB
-    rx_mb=$((rx / 1024 / 1024))
-    tx_mb=$((tx / 1024 / 1024))
-
-    # Get IP address(es)
-    ip=$(ip addr show "$iface" 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
-
-    echo -e "${CYAN}Network ($iface):${NC} RX: ${rx_mb} MB | TX: ${tx_mb} MB | IP: ${ip:-N/A}"
+get_load_avg() {
+    awk '{ print $(NF-2), $(NF-1), $NF }' /proc/loadavg
 }
 
-# Function to get system uptime
+get_ip_address() {
+    ip a | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | head -n1
+}
+
 get_uptime() {
-    local uptime
-    uptime=$(uptime -p 2>/dev/null)
-    echo -e "${CYAN}Uptime:${NC} ${uptime:-N/A}"
+    uptime -p | sed 's/up //'
 }
 
-# Function to get load averages
-get_load_average() {
-    local load
-    load=$(uptime 2>/dev/null | awk -F'load average:' '{ print $2 }' | xargs)
-    echo -e "${CYAN}Load Average:${NC} ${load:-N/A}"
+log_output() {
+    [[ -n "$LOG_FILE" ]] && echo "$1" >> "$LOG_FILE"
 }
 
-# Function to get top 3 CPU and Memory consuming processes
-get_top_processes() {
-    echo -e "${CYAN}Top Processes (CPU% | MEM% | COMMAND):${NC}"
-    ps -eo pcpu,pmem,comm --sort=-pcpu | head -n 4 | tail -n 3 | \
-      awk '{printf "  %5s%%  | %5s%% | %s\n", $1, $2, $3}'
+print_human() {
+    draw_header
+    echo -e "${CYAN}CPU Usage:${NC} $1%"
+    echo -e "${CYAN}Memory Usage:${NC} $2%"
+    echo -e "${CYAN}Disk Usage:${NC} $3%"
+    echo -e "${CYAN}Load Average:${NC} $4"
+    echo -e "${CYAN}IP Address:${NC} $5"
+    echo -e "${CYAN}Uptime:${NC} $6"
+    echo -e "${YELLOW}Updated: $(date) | Refresh: ${INTERVAL}s${NC}"
 }
 
-# Function to draw the header
+print_json() {
+    echo "{\n  \"cpu\": $1,\n  \"mem\": $2,\n  \"disk\": $3,\n  \"loadavg\": \"$4\",\n  \"ip\": \"$5\",\n  \"uptime\": \"$6\"\n}" | tee -a "$LOG_FILE"
+}
+
+print_csv() {
+    echo "$1,$2,$3,$4,$5,\"$6\"" | tee -a "$LOG_FILE"
+}
+
 draw_header() {
     clear
     echo -e "${YELLOW}=============================="
-    echo -e "   🖥️  Enhanced System Monitor"
+    echo -e "   🖥️  sysmon - System Monitor"
     echo -e "==============================${NC}"
 }
 
 # Main loop
 while true; do
-    draw_header
-    get_cpu_usage
-    get_memory_usage
-    get_disk_usage
-    get_network_stats
-    get_uptime
-    get_load_average
-    get_top_processes
-    echo -e "${YELLOW}Updated: $(date) | Refresh interval: ${INTERVAL}s${NC}"
+    CPU=$(get_cpu_usage)
+    MEM=$(get_mem_usage)
+    DISK=$(get_disk_usage)
+    LOAD=$(get_load_avg)
+    IP=$(get_ip_address)
+    UPTIME=$(get_uptime)
+
+    case $OUTPUT_MODE in
+        human)
+            print_human "$CPU" "$MEM" "$DISK" "$LOAD" "$IP" "$UPTIME"
+            ;;
+        json)
+            print_json "$CPU" "$MEM" "$DISK" "$LOAD" "$IP" "$UPTIME"
+            ;;
+        csv)
+            print_csv "$CPU" "$MEM" "$DISK" "$LOAD" "$IP" "$UPTIME"
+            ;;
+        *)
+            echo "Invalid output mode"
+            exit 1
+            ;;
+    esac
+
     sleep "$INTERVAL"
+    [[ "$OUTPUT_MODE" != "human" ]] && break
+    # Only repeat for human view
+
 done
