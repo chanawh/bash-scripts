@@ -27,11 +27,15 @@ fi
 echo "Creating service principal..."
 SP_JSON=$(az ad sp create-for-rbac --name "$SP_NAME" --role "$ROLE" --scopes "$SCOPE" --only-show-errors)
 
-# Extract client ID and secret securely (not printed or saved)
+# Extract client ID and secret securely
 CLIENT_ID=$(echo "$SP_JSON" | jq -r .appId)
 CLIENT_SECRET=$(echo "$SP_JSON" | jq -r .password)
 
-echo "✅ Service Principal '$SP_NAME' created successfully."
-echo "🔒 Credentials were generated but not printed or saved for security reasons."
-echo "📌 If you need to use them, retrieve them securely from Azure or modify this script to handle secrets appropriately."
+# Export credentials silently
+export ARM_SUBSCRIPTION_ID="$SUBSCRIPTION_ID"
+export ARM_CLIENT_ID="$CLIENT_ID"
+export ARM_CLIENT_SECRET="$CLIENT_SECRET"
+export ARM_TENANT_ID="$TENANT_ID"
 
+echo "✅ Service Principal '$SP_NAME' created and credentials exported to current shell."
+echo "🔒 No secrets were printed or saved to disk."
