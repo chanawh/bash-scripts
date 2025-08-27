@@ -2,45 +2,5 @@
 - name: Set up a minimal DNS server
   hosts: dns
   become: yes
-  tasks:
-    - name: Install BIND9
-      apt:
-        name: bind9
-        state: present
-        update_cache: yes
-
-    - name: Configure lab.local zone
-      copy:
-        dest: /etc/bind/named.conf.local
-        content: |
-          zone "lab.local" {
-              type master;
-              file "/etc/bind/db.lab.local";
-          };
-      notify: Reload bind9
-
-    - name: Create zone file for lab.local
-      copy:
-        dest: /etc/bind/db.lab.local
-        owner: bind
-        group: bind
-        mode: 0644
-        content: |
-          $TTL    604800
-          @       IN      SOA     dns.lab.local. admin.lab.local. (
-                                    2         ; Serial
-                               604800         ; Refresh
-                                86400         ; Retry
-                              2419200         ; Expire
-                               604800 )       ; Negative Cache TTL
-          ;
-          @       IN      NS      dns.lab.local.
-          dns     IN      A       192.168.150.10
-          db      IN      A       192.168.150.20
-      notify: Reload bind9
-
-  handlers:
-    - name: Reload bind9
-      service:
-        name: bind9
-        state: reloaded
+  roles:
+    - bind_master
