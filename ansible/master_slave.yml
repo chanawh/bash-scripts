@@ -1,0 +1,225 @@
+---
+- name: Setup MariaDB Master for replication and prepare testdb
+  hosts: master
+  become: yes
+  vars:
+    db_name: testdb
+    replication_user: replica
+    replication_password: Replic@123
+    mariadb_config: /etc/mysql/mariadb.conf.d/50-server.cnf
+    log_dir: /var/log/mysql
+    dump_file: /tmp/testdb.sql
+  tasks:
+    - name: Install MariaDB
+      apt:
+        name: mariadb-server
+        update_cache: yes
+
+    - name: Install PyMySQL for Ansible MySQL modules
+      apt:
+        name: python3-pymysql
+        state: present
+        update_cache: yes
+
+    - name: Ensure log directory exists
+      file:
+        path: "{{ log_dir }}"
+        owner: mysql
+        group: mysql
+        state: directory
+
+    - name: Configure MariaDB master settings
+      blockinfile:
+        path: "{{ mariadb_config }}"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+        insertafter: '^\[mysqld\]'
+        block: |
+          bind-address = 0.0.0.0
+          server-id = 1
+          log_bin = {{ log_dir }}/mariadb-bin
+          binlog_do_db = {{ db_name }}
+      notify: Restart MariaDB
+
+    - name: Create testdb database
+      mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Create example table in testdb
+      mysql_query:
+        login_user: root
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        login_db: "{{ db_name }}"
+        query: |
+          CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100)
+          );
+
+    - name: Insert sample data into testdb
+      mysql_query:
+        login_user: root
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        login_db: "{{ db_name }}"
+        query: |
+          INSERT INTO users (name) VALUES ("Alice"), ("Bob")
+      ignore_errors: yes  # avoid duplicate row errors
+
+    - name: Create replication user
+      mysql_user:
+        name: "{{ replication_user }}"
+        host: '%'
+        password: "{{ replication_password }}"
+        priv: "*.*:REPLICATION SLAVE"
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Dump testdb with master data
+      command: >
+        mysqldump --databases {{ db_name }} --master-data=2 --single-transaction
+        --user=root --socket=/var/run/mysqld/mysqld.sock
+        --result-file={{ dump_file }}
+      args:
+        creates: "{{ dump_file }}"
+
+    - name: Parse binlog file and position from dump
+      shell: |
+        grep 'CHANGE MASTER TO' {{ dump_file }} | \
+        sed -n "s/.*MASTER_LOG_FILE='\([^']*\)', MASTER_LOG_POS=\([0-9]*\).*/\1 \2/p"
+      register: binlog_info
+
+    - name: Set facts for binlog file and position
+      set_fact:
+        master_log_file: "{{ binlog_info.stdout.split()[0] }}"
+        master_log_pos: "{{ binlog_info.stdout.split()[1] | int }}"
+        cacheable: yes
+
+    - name: Fetch DB dump to control node
+      fetch:
+        src: "{{ dump_file }}"
+        dest: "./"
+        flat: yes
+
+  handlers:
+    - name: Restart MariaDB
+      service:
+        name: mariadb
+        state: restarted
+
+# ---------------------------------------------------------
+- name: Setup MariaDB Slave and start replication
+  hosts: slave
+  become: yes
+  vars:
+    db_name: testdb
+    replication_user: replica
+    replication_password: Replic@123
+    mariadb_config: /etc/mysql/mariadb.conf.d/50-server.cnf
+    log_dir: /var/log/mysql
+    dump_file: "./testdb.sql"
+    master_host: "{{ hostvars[groups['master'][0]]['inventory_hostname'] }}"
+    master_log_file: "{{ hostvars[groups['master'][0]]['master_log_file'] }}"
+    master_log_pos: "{{ hostvars[groups['master'][0]]['master_log_pos'] }}"
+  tasks:
+    - name: Install MariaDB
+      apt:
+        name: mariadb-server
+        update_cache: yes
+
+    - name: Install PyMySQL for Ansible MySQL modules
+      apt:
+        name: python3-pymysql
+        state: present
+        update_cache: yes
+
+    - name: Ensure log directory exists
+      file:
+        path: "{{ log_dir }}"
+        owner: mysql
+        group: mysql
+        state: directory
+
+    - name: Configure MariaDB slave settings
+      blockinfile:
+        path: "{{ mariadb_config }}"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+        insertafter: '^\[mysqld\]'
+        block: |
+          bind-address = 0.0.0.0
+          server-id = 2
+          log_bin = {{ log_dir }}/mariadb-bin
+      notify: Restart MariaDB
+
+    - name: Copy DB dump from control node
+      copy:
+        src: "{{ dump_file }}"
+        dest: "/tmp/testdb.sql"
+
+    - name: Import DB dump
+      mysql_db:
+        name: "{{ db_name }}"
+        state: import
+        target: "/tmp/testdb.sql"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Stop slave before reconfiguring
+      mysql_query:
+        login_user: root
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        query: "STOP SLAVE;"
+      ignore_errors: yes
+
+    - name: Reset slave before reconfiguring
+      mysql_query:
+        login_user: root
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        query: "RESET SLAVE ALL;"
+      ignore_errors: yes
+
+    - name: Configure replication on slave (CHANGE MASTER TO)
+      mysql_query:
+        login_user: root
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        query: |
+          CHANGE MASTER TO
+            MASTER_HOST='{{ master_host }}',
+            MASTER_USER='{{ replication_user }}',
+            MASTER_PASSWORD='{{ replication_password }}',
+            MASTER_LOG_FILE='{{ master_log_file }}',
+            MASTER_LOG_POS={{ master_log_pos }};
+
+    - name: Start slave replication
+      mysql_query:
+        login_user: root
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        query: "START SLAVE;"
+
+    - name: Check slave status
+      mysql_query:
+        login_user: root
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        query: "SHOW SLAVE STATUS"
+      register: slave_status
+
+    - name: Debug slave_status structure
+      debug:
+        var: slave_status
+
+    - name: Fail if slave status is not available
+      fail:
+        msg: "SHOW SLAVE STATUS returned no results!"
+      when: (slave_status.query_result | default([]) | first | default([]) | length) == 0
+
+    - name: Show important slave status fields
+      debug:
+        msg: >
+          IO={{ (slave_status.query_result | default([]) | first | default([]) | first | default({})).get('Slave_IO_Running', 'N/A') }},
+          SQL={{ (slave_status.query_result | default([]) | first | default([]) | first | default({})).get('Slave_SQL_Running', 'N/A') }},
+          Last_Error={{ (slave_status.query_result | default([]) | first | default([]) | first | default({})).get('Last_Error', 'N/A') }}
+
+  handlers:
+    - name: Restart MariaDB
+      service:
+        name: mariadb
+        state: restarted

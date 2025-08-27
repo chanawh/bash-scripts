@@ -1,0 +1,49 @@
+---
+- name: Install and configure HAProxy
+  hosts: haproxy
+  become: yes
+  tasks:
+    - name: Install haproxy
+      apt:
+        name: haproxy
+        state: present
+        update_cache: yes
+
+    - name: Enable and start haproxy
+      systemd:
+        name: haproxy
+        enabled: yes
+        state: started
+
+    - name: Deploy a simple haproxy.cfg
+      copy:
+        dest: /etc/haproxy/haproxy.cfg
+        content: |
+          global
+              log /dev/log    local0
+              log /dev/log    local1 notice
+              daemon
+
+          defaults
+              log     global
+              mode    http
+              option  httplog
+              option  dontlognull
+              timeout connect 5000
+              timeout client  50000
+              timeout server  50000
+
+          frontend http-in
+              bind *:80
+              default_backend servers
+
+          backend servers
+              server server1 192.168.150.20:8080 maxconn 32
+
+      notify: Reload haproxy
+
+  handlers:
+    - name: Reload haproxy
+      service:
+        name: haproxy
+        state: reloaded
