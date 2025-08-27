@@ -1,0 +1,27 @@
+---
+- name: Install BIND9
+  apt:
+    name: bind9
+    state: present
+    update_cache: yes
+
+- name: Ensure BIND9 is started and enabled
+  systemd:
+    name: bind9
+    enabled: yes
+    state: started
+
+- name: Configure named.conf.local with custom zones
+  template:
+    src: named.conf.local.j2
+    dest: /etc/bind/named.conf.local
+  notify: Reload bind9
+
+- name: Place zone file for lab.local
+  template:
+    src: db.lab.local.j2
+    dest: /etc/bind/db.lab.local
+    owner: bind
+    group: bind
+    mode: 0644
+  notify: Reload bind9
