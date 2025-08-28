@@ -1,0 +1,339 @@
+---
+- name: Install and configure Prometheus, Grafana, node_exporter, and bind_exporter on DNS server
+  hosts: monitoring
+  become: yes
+  vars:
+    prometheus_version: "2.51.2"
+    prometheus_user: prometheus
+    prometheus_group: prometheus
+    node_exporter_version: "1.7.0"
+    bind_exporter_version: "0.6.1"
+    grafana_apt_key_url: https://packages.grafana.com/gpg.key
+    grafana_apt_repo: "deb https://packages.grafana.com/oss/deb stable main"
+    alertmanager_version: "0.27.0"
+  tasks:
+    - name: Install dependencies
+      apt:
+        name:
+          - wget
+          - tar
+          - adduser
+          - libfontconfig1
+        state: present
+        update_cache: yes
+
+    - name: Create Prometheus user and group
+      user:
+        name: "{{ prometheus_user }}"
+        shell: /sbin/nologin
+        system: yes
+        create_home: no
+
+    - name: Download Prometheus
+      get_url:
+        url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        dest: /tmp/prometheus.tar.gz
+
+    - name: Extract Prometheus
+      unarchive:
+        src: /tmp/prometheus.tar.gz
+        dest: /tmp
+        remote_src: yes
+
+    - name: Install Prometheus binaries
+      copy:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        mode: 0755
+        remote_src: yes
+      loop:
+        - prometheus
+        - promtool
+
+    - name: Create Prometheus directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        mode: 0755
+      loop:
+        - /etc/prometheus
+        - /var/lib/prometheus
+
+    # Node Exporter install
+    - name: Download node_exporter
+      get_url:
+        url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        dest: /tmp/node_exporter.tar.gz
+
+    - name: Extract node_exporter
+      unarchive:
+        src: /tmp/node_exporter.tar.gz
+        dest: /tmp
+        remote_src: yes
+
+    - name: Install node_exporter binary
+      copy:
+        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+        dest: /usr/local/bin/node_exporter
+        mode: 0755
+        remote_src: yes
+
+    - name: Create node_exporter systemd service
+      copy:
+        dest: /etc/systemd/system/node_exporter.service
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+
+          [Service]
+          User=nobody
+          ExecStart=/usr/local/bin/node_exporter
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: 0644
+
+    - name: Start node_exporter
+      systemd:
+        name: node_exporter
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # Bind Exporter install
+    - name: Download bind_exporter
+      get_url:
+        url: "https://github.com/prometheus-community/bind_exporter/releases/download/v{{ bind_exporter_version }}/bind_exporter-{{ bind_exporter_version }}.linux-amd64.tar.gz"
+        dest: /tmp/bind_exporter.tar.gz
+
+    - name: Extract bind_exporter
+      unarchive:
+        src: /tmp/bind_exporter.tar.gz
+        dest: /tmp
+        remote_src: yes
+
+    - name: Install bind_exporter binary
+      copy:
+        src: "/tmp/bind_exporter-{{ bind_exporter_version }}.linux-amd64/bind_exporter"
+        dest: /usr/local/bin/bind_exporter
+        mode: 0755
+        remote_src: yes
+
+    - name: Create bind_exporter systemd service
+      copy:
+        dest: /etc/systemd/system/bind_exporter.service
+        content: |
+          [Unit]
+          Description=BIND Exporter
+          After=network.target
+
+          [Service]
+          User=nobody
+          ExecStart=/usr/local/bin/bind_exporter
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: 0644
+
+    - name: Start bind_exporter
+      systemd:
+        name: bind_exporter
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # Prometheus config
+    - name: Copy Prometheus config
+      copy:
+        dest: /etc/prometheus/prometheus.yml
+        content: |
+          global:
+            scrape_interval: 15s
+          scrape_configs:
+            - job_name: "prometheus"
+              static_configs:
+                - targets: ['localhost:9090']
+            - job_name: "node"
+              static_configs:
+                - targets: ['localhost:9100']
+            - job_name: "bind"
+              static_configs:
+                - targets: ['localhost:9119']
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        mode: 0644
+
+    - name: Create Prometheus systemd service
+      copy:
+        dest: /etc/systemd/system/prometheus.service
+        content: |
+          [Unit]
+          Description=Prometheus
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          User=prometheus
+          Group=prometheus
+          Type=simple
+          ExecStart=/usr/local/bin/prometheus \
+            --config.file=/etc/prometheus/prometheus.yml \
+            --storage.tsdb.path=/var/lib/prometheus
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: 0644
+
+    - name: Reload systemd and start Prometheus
+      systemd:
+        name: prometheus
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # ---- Alertmanager Install & Config ----
+
+    - name: Download Alertmanager
+      get_url:
+        url: "https://github.com/prometheus/alertmanager/releases/download/v{{ alertmanager_version }}/alertmanager-{{ alertmanager_version }}.linux-amd64.tar.gz"
+        dest: /tmp/alertmanager.tar.gz
+
+    - name: Extract Alertmanager
+      unarchive:
+        src: /tmp/alertmanager.tar.gz
+        dest: /tmp
+        remote_src: yes
+
+    - name: Install Alertmanager binaries
+      copy:
+        src: "/tmp/alertmanager-{{ alertmanager_version }}.linux-amd64/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        mode: 0755
+        remote_src: yes
+      loop:
+        - alertmanager
+        - amtool
+
+    - name: Create Alertmanager directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: 0755
+      loop:
+        - /etc/alertmanager
+        - /var/lib/alertmanager
+
+    - name: Deploy Alertmanager config
+      template:
+        src: alertmanager.yml.j2
+        dest: /etc/alertmanager/alertmanager.yml
+        owner: prometheus
+        group: prometheus
+        mode: 0644
+
+    - name: Create Alertmanager systemd service
+      copy:
+        dest: /etc/systemd/system/alertmanager.service
+        content: |
+          [Unit]
+          Description=Prometheus Alertmanager
+          After=network-online.target
+
+          [Service]
+          User=prometheus
+          Group=prometheus
+          Type=simple
+          ExecStart=/usr/local/bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml --storage.path=/var/lib/alertmanager
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: 0644
+
+    - name: Reload and start Alertmanager
+      systemd:
+        name: alertmanager
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # ---- Prometheus Alerting Config ----
+
+    - name: Copy Prometheus config with alerting section
+      copy:
+        dest: /etc/prometheus/prometheus.yml
+        content: |
+          global:
+            scrape_interval: 15s
+          alerting:
+            alertmanagers:
+              - static_configs:
+                  - targets: ['localhost:9093']
+          rule_files:
+            - "/etc/prometheus/alert.rules.yml"
+          scrape_configs:
+            - job_name: "prometheus"
+              static_configs:
+                - targets: ['localhost:9090']
+            - job_name: "node"
+              static_configs:
+                - targets: ['localhost:9100']
+            - job_name: "bind"
+              static_configs:
+                - targets: ['localhost:9119']
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        mode: 0644
+
+    - name: Copy Prometheus alert rules file (DNS query alert)
+      copy:
+        dest: /etc/prometheus/alert.rules.yml
+        content: |
+          groups:
+            - name: bind_alerts
+              rules:
+                - alert: BINDHighQueryRate
+                  expr: increase(bind_incoming_queries_total[1m]) > 100
+                  for: 1m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "High DNS query rate detected"
+                    description: "More than 100 incoming DNS queries in the last minute on instance {{'{{'}} $labels.instance {{'}}'}}."
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        mode: 0644
+
+    - name: Reload systemd and restart Prometheus after config change
+      systemd:
+        name: prometheus
+        enabled: yes
+        state: restarted
+        daemon_reload: yes
+
+    # Grafana install
+    - name: Add Grafana APT key
+      apt_key:
+        url: "{{ grafana_apt_key_url }}"
+        state: present
+
+    - name: Add Grafana repository
+      apt_repository:
+        repo: "{{ grafana_apt_repo }}"
+        state: present
+
+    - name: Install Grafana
+      apt:
+        name: grafana
+        state: present
+        update_cache: yes
+
+    - name: Ensure Grafana is started and enabled
+      systemd:
+        name: grafana-server
+        enabled: yes
+        state: started

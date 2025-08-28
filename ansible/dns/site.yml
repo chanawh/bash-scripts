@@ -1,0 +1,6 @@
+---
+- name: Set up a minimal DNS server
+  hosts: dns
+  become: yes
+  roles:
+    - bind_master
