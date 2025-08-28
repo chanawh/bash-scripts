@@ -1,5 +1,0 @@
----
-- name: Reload bind9
-  systemd:
-    name: bind9
-    state: reloaded
