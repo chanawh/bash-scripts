@@ -1,0 +1,5 @@
+[dns]
+192.168.150.10 ansible_user=root ansible_ssh_private_key_file=~/.ssh/id_rsa
+
+[web]
+192.168.150.20 ansible_user=root ansible_ssh_private_key_file=~/.ssh/id_rsa
