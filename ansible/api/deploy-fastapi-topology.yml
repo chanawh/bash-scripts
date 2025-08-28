@@ -1,0 +1,152 @@
+---
+- name: Deploy FastAPI Topology API
+  hosts: web
+  become: yes
+  vars:
+    app_dir: /opt/fastapi-topology
+    venv_dir: "{{ app_dir }}/venv"
+    user: fastapi
+    group: fastapi
+    service_name: fastapi-topology
+    listen_port: 8000
+    inventory_src: "{{ playbook_dir }}/../ansible-hosts3"
+    inventory_dest: "{{ app_dir }}/ansible-hosts3"
+
+  tasks:
+    - name: Ensure fastapi system user exists with correct home
+      user:
+        name: "{{ user }}"
+        system: yes
+        create_home: no
+        shell: /usr/sbin/nologin
+        home: "{{ app_dir }}"
+
+    - name: Create application directory (and home dir for fastapi user)
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ user }}"
+        group: "{{ group }}"
+
+    - name: Create Python virtual environment
+      command: python3 -m venv "{{ venv_dir }}"
+      args:
+        creates: "{{ venv_dir }}/bin/activate"
+
+    - name: Ensure ownership of all app files and venv
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        recurse: yes
+        owner: "{{ user }}"
+        group: "{{ group }}"
+
+    - name: Copy FastAPI app code
+      copy:
+        src: ../api/main.py
+        dest: "{{ app_dir }}/main.py"
+        owner: "{{ user }}"
+        group: "{{ group }}"
+        mode: '0644'
+      notify: Restart FastAPI topology
+
+    - name: Copy ansible-hosts3 inventory
+      copy:
+        src: "{{ inventory_src }}"
+        dest: "{{ inventory_dest }}"
+        owner: "{{ user }}"
+        group: "{{ group }}"
+        mode: '0644'
+      notify: Restart FastAPI topology
+
+    - name: Create requirements.txt
+      copy:
+        dest: "{{ app_dir }}/requirements.txt"
+        content: |
+          fastapi
+          uvicorn[standard]
+        owner: "{{ user }}"
+        group: "{{ group }}"
+        mode: '0644'
+      notify: Restart FastAPI topology
+
+    - name: Install Python requirements in venv
+      pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        virtualenv: "{{ venv_dir }}"
+        virtualenv_python: python3
+
+    - name: Create systemd service for FastAPI topology
+      copy:
+        dest: "/etc/systemd/system/{{ service_name }}.service"
+        content: |
+          [Unit]
+          Description=FastAPI Topology REST API
+          After=network.target
+
+          [Service]
+          User={{ user }}
+          Group={{ group }}
+          WorkingDirectory={{ app_dir }}
+          ExecStart={{ venv_dir }}/bin/uvicorn main:app --host 0.0.0.0 --port {{ listen_port }}
+          Restart=always
+          Environment="PATH={{ venv_dir }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          Environment="PYTHONUNBUFFERED=1"
+          Environment="HOME={{ app_dir }}"
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart FastAPI topology
+
+    - name: Wait for topology API to be up
+      uri:
+        url: "http://localhost:{{ listen_port }}/topology"
+        status_code: 200
+        timeout: 10
+      register: result
+      retries: 10
+      delay: 2
+      until: result.status == 200
+
+    - name: Show API result for verification
+      debug:
+        var: result.json
+
+    # --- ADVANCED TOPOLOGY CHECKS ---
+    - name: Fetch advanced topology details
+      uri:
+        url: "http://localhost:{{ listen_port }}/topology/details"
+        method: GET
+        return_content: yes
+        status_code: 200
+        timeout: 10
+      register: topo_details
+      retries: 10
+      delay: 2
+      until: topo_details.status == 200
+
+    - name: Fail if any server is not healthy
+      fail:
+        msg: "Unhealthy servers found: {{ degraded_servers }}"
+      vars:
+        degraded_servers: >-
+          {{ topo_details.json.servers | selectattr('status', 'ne', 'healthy') | list }}
+      when: degraded_servers | length > 0
+
+    - name: Show advanced topology links
+      debug:
+        msg: "Link {{ item.from }} -> {{ item.to }}: {{ item.latency_ms }} ms"
+      loop: "{{ topo_details.json.links }}"
+
+  handlers:
+    - name: Restart FastAPI topology
+      systemd:
+        name: "{{ service_name }}"
+        enabled: yes
+        state: restarted
+        daemon_reload: yes
