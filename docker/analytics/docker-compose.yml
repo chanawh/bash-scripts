@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./country_wise_latest_clean.csv:/docker-entrypoint-initdb.d/country_wise_latest_clean.csv:ro
+      - ./clickhouse-entrypoint.sh:/docker-entrypoint-initdb.d/clickhouse-entrypoint.sh:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  superset:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    image: custom-superset:3.0.4-clickhouse
+    container_name: superset
+    environment:
+      - SUPERSET_SECRET_KEY=myverystrongsecretkey123456789
+      - SUPERSET_CONFIG_PATH=/app/pythonpath/superset_config.py
+      - PYTHONPATH=/app/pythonpath
+    ports:
+      - "8088:8088"
+    depends_on:
+      - clickhouse
+    volumes:
+      - ./superset_config.py:/app/pythonpath/superset_config.py
+    command: >
+      /bin/bash -c "
+        superset db upgrade &&
+        (superset fab create-admin --username admin --firstname Superset --lastname Admin --email admin@localhost --password admin || true) &&
+        superset init &&
+        superset run -h 0.0.0.0 -p 8088"
+
+volumes:
+  clickhouse-data:
+

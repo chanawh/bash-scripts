@@ -1,0 +1,17 @@
+FROM apache/superset:3.0.4
+
+# Clean any existing local user packages
+RUN rm -rf /app/superset_home/.local
+
+# Upgrade pip and setuptools first
+RUN pip install --upgrade pip setuptools wheel
+
+# Pin compatible SQLAlchemy and Alembic versions for Superset 3.x
+RUN pip install --force-reinstall "SQLAlchemy==1.4.49" "alembic==1.13.1"
+
+# Install ClickHouse SQLAlchemy driver
+RUN pip install clickhouse-sqlalchemy==0.2.3
+
+EXPOSE 8088
+
+CMD ["superset", "run", "-h", "0.0.0.0", "-p", "8088"]
